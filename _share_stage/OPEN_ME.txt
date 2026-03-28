@@ -1,0 +1,4 @@
+Veritas AI share package
+
+Open index.html in a browser after extracting this zip.
+If you want live verification and URL previews, run the backend separately on your machine.
