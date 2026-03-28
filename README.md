@@ -114,13 +114,13 @@ Follow these steps to get Veritas AI running locally on your machine.
 ### Option 1: Clone with Git (Recommended)
 **1. Clone the repository**
 ```bash
-git clone https://github.com/your-username/veritas-ai.git
-cd veritas-ai
+git clone https://github.com/suryadeepkrsingh-cmd/fake-news.git
+cd fake-news
 ```
 
 ### Option 2: Download ZIP File
 **1. Download and extract**
-- Click the **"Download Project ZIP"** button above or visit [GitHub Releases](https://github.com/your-username/veritas-ai/releases)
+- On GitHub, click **Code** then **Download ZIP**
 - Extract the ZIP file to your desired location
 - Open the extracted folder in your code editor
 
@@ -136,7 +136,11 @@ npm install --prefix server
 
 **4. Configure environment variables**
 
-Create or edit the file `server/.env` (see [Environment Variables](#environment-variables) below).
+Copy the example env file and add your own Gemini key:
+```powershell
+Copy-Item server\.env.example server\.env
+```
+Then edit `server/.env` as described in [Environment Variables](#environment-variables) below.
 
 **5. Start the backend server** (Terminal 1)
 ```bash
@@ -158,7 +162,7 @@ You should see: `Local: http://localhost:5173/`
 
 ## 🔐 Environment Variables
 
-Create a file named `.env` inside the `server/` directory with the following content:
+Create a file named `.env` inside the `server/` directory, or copy `server/.env.example` and fill in your values:
 
 ```env
 # server/.env
@@ -187,7 +191,7 @@ The server cycles through keys round-robin style — when one key receives a `42
 3. Click **Create API Key** and copy the generated key.
 4. Paste it into your `server/.env` file.
 
-> **Security Warning:** Never commit your `.env` file to version control. The `.gitignore` should exclude `node_modules/` and ideally `.env` as well.
+> **Security Warning:** Never commit your `.env` file to version control. This repo includes `server/.env.example` as a safe template, and `.gitignore` already excludes `server/.env`.
 
 ---
 
