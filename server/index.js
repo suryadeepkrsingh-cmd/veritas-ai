@@ -452,6 +452,7 @@ app.post('/api/verify', async (req, res) => {
       ${additionalContext}
       
       Analyze the following claim/URL and provide a structured verification result in JSON format.
+      Analyze the provided claim or article in its original language. Do not force translation unless necessary for understanding. Return the verdict in English ("True", "False", or "Unverified"), but provide the explanation, red flags, and supporting text in the same language as the user's input.
       
       ${claimContext}
       
