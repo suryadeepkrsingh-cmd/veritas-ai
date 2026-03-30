@@ -19,11 +19,40 @@ import {
   Sun,
   Moon,
   X,
+  Mic,
+  MicOff,
 } from 'lucide-react';
 import { ThreeCanvas } from './components/ThreeCanvas';
 import { fetchUrlPreview, submitFeedback, verifyClaim } from './lib/ai';
 import type { VerificationResult } from './lib/ai';
 import type { UrlPreviewResult } from './lib/ai';
+
+type SpeechRecognitionAlternative = {
+  transcript: string;
+};
+
+type SpeechRecognitionResultLike = {
+  isFinal: boolean;
+  0: SpeechRecognitionAlternative;
+};
+
+type SpeechRecognitionEventLike = {
+  resultIndex: number;
+  results: ArrayLike<SpeechRecognitionResultLike>;
+};
+
+type SpeechRecognitionLike = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((event: { error?: string }) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+};
+
+type SpeechRecognitionCtor = new () => SpeechRecognitionLike;
 
 const examplePrompts = [
   'Did India win the 2026 T20 World Cup?',
@@ -49,6 +78,12 @@ const riskyTerms = [
 ];
 
 const HISTORY_STORAGE_KEY = 'veritas-history';
+const verificationStages = [
+  'Checking the claim format',
+  'Collecting supporting context',
+  'Comparing source signals',
+  'Writing a cautious summary',
+];
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -103,10 +138,46 @@ function HorizontalMetric({ title, value, desc, icon: Icon, color, valColor }: {
   );
 }
 
+function getVerdictLabel(verdict: VerificationResult['verdict']) {
+  if (verdict === 'True') return 'Likely true';
+  if (verdict === 'False') return 'Likely false';
+  if (verdict === 'Insufficient Data') return 'Insufficient Data';
+  return 'Needs more evidence';
+}
+
+function getVerdictTone(verdict: VerificationResult['verdict']) {
+  if (verdict === 'False') return 'text-red-500';
+  if (verdict === 'True') return 'text-emerald-500';
+  if (verdict === 'Insufficient Data') return 'text-blue-500';
+  return 'text-amber-400';
+}
+
+function getSourceTypeLabel(name: string) {
+  if (name === 'Original article') return 'Submitted link';
+  if (name === 'Wikipedia') return 'Reference';
+  return 'Supporting source';
+}
+
+function getDisplayUrl(url: string) {
+  return url.replace(/^https?:\/\//, '');
+}
+
+function getConfidenceBandTone(confidenceBand: 'High' | 'Medium' | 'Low') {
+  if (confidenceBand === 'High') return 'text-emerald-400';
+  if (confidenceBand === 'Medium') return 'text-amber-400';
+  return 'text-red-400';
+}
+
+function getCrossCheckTone(status: 'strong' | 'moderate' | 'limited' | 'none') {
+  if (status === 'strong') return 'text-emerald-400';
+  if (status === 'moderate') return 'text-sky-400';
+  if (status === 'limited') return 'text-amber-400';
+  return 'text-slate-500';
+}
+
 function HeroVerdictCard({ result }: { result: VerificationResult }) {
-  const isFalse = result.verdict === 'False';
   const color = 'var(--verdict-color)';
-  const valColor = isFalse ? 'text-red-500' : 'text-emerald-500';
+  const valColor = getVerdictTone(result.verdict);
 
   return (
     <div
@@ -122,9 +193,9 @@ function HeroVerdictCard({ result }: { result: VerificationResult }) {
       </div>
 
       <div className="relative z-10 flex flex-col items-center gap-2">
-        <h3 className="text-sm font-bold uppercase tracking-[0.4em] text-white/40">Final Verdict</h3>
+        <h3 className="text-sm font-bold uppercase tracking-[0.4em] text-white/40">Current Assessment</h3>
         <div className={`text-6xl font-black tracking-tighter ${valColor} drop-shadow-[0_0_15px_rgba(${color},0.5)]`}>
-          {result.verdict}
+          {getVerdictLabel(result.verdict)}
         </div>
       </div>
 
@@ -165,12 +236,17 @@ function App() {
   });
   const [showHistory, setShowHistory] = useState(false);
   const [activeClaim, setActiveClaim] = useState('');
+  const [verificationStage, setVerificationStage] = useState(0);
   const [copiedSummary, setCopiedSummary] = useState(false);
   const [urlPreview, setUrlPreview] = useState<UrlPreviewResult | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState('');
+  const [voiceSupported, setVoiceSupported] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [voiceError, setVoiceError] = useState('');
   const [isFeedbackModalOpen, setIsFeedbackModalOpen] = useState(false);
   const [feedbackStatus, setFeedbackStatus] = useState<'idle' | 'sending' | 'done' | 'error'>('idle');
+  const [feedbackErrorMessage, setFeedbackErrorMessage] = useState('');
   const [feedbackForm, setFeedbackForm] = useState({
     name: '',
     email: '',
@@ -179,6 +255,9 @@ function App() {
   const feedbackModalTimerRef = useRef<number | null>(null);
   const dashboardRef = useRef<HTMLElement | null>(null);
   const howItWorksRef = useRef<HTMLElement | null>(null);
+  const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const latestVoiceTranscriptRef = useRef('');
+  const handleVerifyRef = useRef<(overrideInput?: string) => Promise<void>>(async () => {});
 
   const inputProfile = useMemo(() => {
     const trimmed = activeClaim.trim();
@@ -218,8 +297,93 @@ function App() {
         window.clearTimeout(feedbackModalTimerRef.current);
         feedbackModalTimerRef.current = null;
       }
+
+      if (speechRecognitionRef.current) {
+        speechRecognitionRef.current.stop();
+        speechRecognitionRef.current = null;
+      }
     };
   }, []);
+
+  useEffect(() => {
+    const speechApi = window as Window & {
+      SpeechRecognition?: SpeechRecognitionCtor;
+      webkitSpeechRecognition?: SpeechRecognitionCtor;
+    };
+    const SpeechRecognition =
+      speechApi.SpeechRecognition || speechApi.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      setVoiceSupported(false);
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = 'en-IN';
+
+    recognition.onresult = (event) => {
+      let transcript = '';
+      let finalTranscript = '';
+
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        transcript += event.results[index][0].transcript;
+        if (event.results[index].isFinal) {
+          finalTranscript += event.results[index][0].transcript;
+        }
+      }
+
+      setInput(transcript.trimStart());
+      if (finalTranscript.trim()) {
+        latestVoiceTranscriptRef.current = finalTranscript.trim();
+      }
+    };
+
+    recognition.onerror = (event) => {
+      if (event.error === 'not-allowed') {
+        setVoiceError('Microphone permission was blocked.');
+      } else if (event.error === 'no-speech') {
+        setVoiceError('No speech was detected. Please try again.');
+      } else {
+        setVoiceError('Voice search could not understand the input.');
+      }
+      setIsListening(false);
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+      const finalVoiceClaim = latestVoiceTranscriptRef.current.trim();
+      if (finalVoiceClaim) {
+        latestVoiceTranscriptRef.current = '';
+        setInput(finalVoiceClaim);
+        void handleVerifyRef.current(finalVoiceClaim);
+      }
+    };
+
+    speechRecognitionRef.current = recognition;
+    setVoiceSupported(true);
+
+    return () => {
+      recognition.stop();
+      if (speechRecognitionRef.current === recognition) {
+        speechRecognitionRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!loading) {
+      setVerificationStage(0);
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      setVerificationStage((current) => Math.min(current + 1, verificationStages.length - 1));
+    }, 900);
+
+    return () => window.clearInterval(interval);
+  }, [loading]);
 
   useEffect(() => {
     const trimmed = input.trim();
@@ -262,6 +426,7 @@ function App() {
       setResult(data);
       setIsFeedbackModalOpen(false);
       setFeedbackStatus('idle');
+      setFeedbackErrorMessage('');
       setFeedbackForm({ name: '', email: '', message: '' });
 
       if (feedbackModalTimerRef.current) {
@@ -278,6 +443,30 @@ function App() {
       setLoading(false);
     }
   };
+  handleVerifyRef.current = handleVerify;
+
+  const toggleVoiceSearch = () => {
+    if (!speechRecognitionRef.current || loading) return;
+
+    setVoiceError('');
+
+    if (isListening) {
+      latestVoiceTranscriptRef.current = '';
+      speechRecognitionRef.current.stop();
+      setIsListening(false);
+      return;
+    }
+
+    try {
+      latestVoiceTranscriptRef.current = '';
+      speechRecognitionRef.current.start();
+      setIsListening(true);
+    } catch (error) {
+      console.error('Voice search failed to start', error);
+      setVoiceError('Voice search could not start right now.');
+      setIsListening(false);
+    }
+  };
 
   const scrollToHowItWorks = () => {
     howItWorksRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -288,7 +477,7 @@ function App() {
 
     try {
       await navigator.clipboard.writeText(
-        `Verdict: ${result.verdict}\nConfidence: ${(result.confidence * 100).toFixed(1)}%\nExplanation: ${result.explanation}`,
+        `Assessment: ${getVerdictLabel(result.verdict)}\nConfidence: ${(result.confidence * 100).toFixed(1)}%\nExplanation: ${result.explanation}`,
       );
       setCopiedSummary(true);
       window.setTimeout(() => setCopiedSummary(false), 1800);
@@ -300,7 +489,7 @@ function App() {
   const handleShareResult = async () => {
     if (!result) return;
 
-    const summary = `Veritas AI Verdict: ${result.verdict} (${(result.confidence * 100).toFixed(1)}%)\nClaim: ${activeClaim}\n${result.explanation}`;
+    const summary = `Veritas AI Assessment: ${getVerdictLabel(result.verdict)} (${(result.confidence * 100).toFixed(1)}%)\nClaim: ${activeClaim}\n${result.explanation}`;
 
     try {
       if (navigator.share) {
@@ -328,12 +517,14 @@ function App() {
     const message = feedbackForm.message.trim();
 
     if (!name || !email || !message) {
+      setFeedbackErrorMessage('Please fill name, email, and message.');
       setFeedbackStatus('error');
       return;
     }
 
     try {
       setFeedbackStatus('sending');
+      setFeedbackErrorMessage('');
       await submitFeedback({
         claim: activeClaim,
         verdict: result.verdict,
@@ -346,6 +537,7 @@ function App() {
       setFeedbackStatus('done');
     } catch (error) {
       console.error('Feedback submission failed', error);
+      setFeedbackErrorMessage('Feedback could not be submitted. Check the backend and try again.');
       setFeedbackStatus('error');
     }
   };
@@ -481,6 +673,21 @@ function App() {
                 <div className="searchfx-input-mask" />
               </div>
             </div>
+            {voiceSupported && (
+              <button
+                onClick={toggleVoiceSearch}
+                disabled={loading}
+                type="button"
+                className={`inline-flex h-12 w-12 items-center justify-center rounded-xl border transition-all ${
+                  isListening
+                    ? 'border-rose-400/40 bg-rose-500/15 text-rose-300 shadow-[0_0_20px_rgba(251,113,133,0.2)]'
+                    : 'border-white/10 bg-white/5 text-slate-200 hover:bg-white/10'
+                } disabled:opacity-60`}
+                title={isListening ? 'Stop voice input' : 'Start voice input'}
+              >
+                {isListening ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
+              </button>
+            )}
             <button
               onClick={() => handleVerify()}
               disabled={loading}
@@ -563,6 +770,28 @@ function App() {
           </div>
 
           <div className="mt-5 w-full text-left">
+            {loading && (
+              <div className="mb-4 rounded-2xl border border-sky-400/20 bg-sky-500/10 p-4">
+                <p className="mb-3 text-[11px] font-bold uppercase tracking-[0.3em] text-sky-300">
+                  Verification Progress
+                </p>
+                <div className="flex flex-col gap-2">
+                  {verificationStages.map((stage, index) => (
+                    <div key={stage} className="flex items-center gap-3 text-sm">
+                      <div
+                        className={`h-2.5 w-2.5 rounded-full ${
+                          index <= verificationStage ? 'bg-sky-300 shadow-[0_0_10px_rgba(125,211,252,0.9)]' : 'bg-slate-600'
+                        }`}
+                      />
+                      <span className={index <= verificationStage ? 'text-sky-100' : 'text-slate-400'}>
+                        {stage}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {previewLoading && (
               <div className="mb-3 rounded-xl border border-blue-400/20 bg-blue-500/10 px-4 py-3 text-sm text-blue-200">
                 Fetching URL preview...
@@ -575,10 +804,22 @@ function App() {
               </div>
             )}
 
+            {voiceSupported && isListening && (
+              <div className="mb-3 rounded-xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
+                Listening... speak your claim or news headline.
+              </div>
+            )}
+
+            {voiceError && (
+              <div className="mb-3 rounded-xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+                {voiceError}
+              </div>
+            )}
+
             {urlPreview && !previewLoading && (
               <div className="mb-4 rounded-2xl border border-white/10 bg-slate-900/40 p-4">
                 <p className="mb-1 text-[11px] font-bold uppercase tracking-widest text-emerald-300">
-                  URL preview · {urlPreview.domain}
+                  URL preview | {urlPreview.domain}
                 </p>
                 <h4 className="line-clamp-1 text-sm font-semibold text-white">{urlPreview.title}</h4>
                 <p className="mt-1 line-clamp-2 text-xs text-slate-400">{urlPreview.excerpt}</p>
@@ -676,8 +917,8 @@ function App() {
                         </p>
                       </div>
                       <p className="text-xl font-bold text-white leading-relaxed lg:text-2xl">
-                        This content has been classified as <span className={result.verdict === 'False' ? 'text-red-500' : 'text-emerald-500'}>{result.verdict}</span>.
-                        Detected across {result.sources.length} sources with a neural confidence of {(result.confidence * 100).toFixed(1)}%.
+                        Current assessment: <span className={getVerdictTone(result.verdict)}>{getVerdictLabel(result.verdict)}</span>.
+                        Backed by {result.sources.length} cited source{result.sources.length === 1 ? '' : 's'} with an AI confidence of {(result.confidence * 100).toFixed(1)}%.
                       </p>
                     </div>
                   </div>
@@ -719,7 +960,7 @@ function App() {
                 <div
                   className="spark-border dashboard-card group glass flex flex-col items-center justify-center rounded-2xl p-6 text-center shadow-xl transition-all duration-500 hover:scale-[1.05]"
                   style={{
-                    '--color-card': result.verdict === 'False' ? '239, 68, 68' : result.verdict === 'True' ? '16, 185, 129' : '234, 179, 8'
+                    '--color-card': result.verdict === 'False' ? '239, 68, 68' : result.verdict === 'True' ? '16, 185, 129' : result.verdict === 'Insufficient Data' ? '59, 130, 246' : '234, 179, 8'
                   } as CSSProperties}
                 >
                   <div
@@ -727,23 +968,27 @@ function App() {
                       ? 'bg-red-500/20 text-red-500 shadow-red-500/20'
                       : result.verdict === 'True'
                         ? 'bg-green-500/20 text-green-500 shadow-green-500/20'
-                        : 'bg-yellow-500/20 text-yellow-500 shadow-yellow-500/20'
+                        : result.verdict === 'Insufficient Data'
+                          ? 'bg-blue-500/20 text-blue-500 shadow-blue-500/20'
+                          : 'bg-yellow-500/20 text-yellow-500 shadow-yellow-500/20'
                       }`}
                   >
                     <AlertCircle className="h-12 w-12" />
                   </div>
                   <h3 className="mb-1 text-[11px] font-bold uppercase tracking-widest text-slate-400">
-                    Final Verdict
+                    Current Assessment
                   </h3>
                   <p
                     className={`mb-5 text-4xl font-black tracking-tight ${result.verdict === 'False'
                       ? 'text-red-400'
                       : result.verdict === 'True'
                         ? 'text-green-400'
-                        : 'text-yellow-400'
+                        : result.verdict === 'Insufficient Data'
+                          ? 'text-blue-400'
+                          : 'text-yellow-400'
                       }`}
                   >
-                    {result.verdict}
+                    {getVerdictLabel(result.verdict)}
                   </p>
 
                   <div className="mb-2 h-2 w-full overflow-hidden rounded-full bg-slate-800/80 ring-1 ring-white/5">
@@ -752,6 +997,8 @@ function App() {
                         ? 'bg-red-500'
                         : result.verdict === 'True'
                           ? 'bg-green-500'
+                          : result.verdict === 'Insufficient Data'
+                            ? 'bg-blue-500'
                           : 'bg-yellow-500'
                         }`}
                       style={{ width: `${result.confidence * 100}%` }}
@@ -913,6 +1160,323 @@ function App() {
                 </div>
               </div>
 
+              <div
+                className="spark-border dashboard-card glass rounded-2xl p-6 shadow-xl"
+                style={{ '--color-card': '34, 197, 94' } as CSSProperties}
+              >
+                <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <h3 className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-widest text-slate-300">
+                      <ClipboardCheck className="h-4 w-4 text-emerald-400" /> Evidence Panel
+                    </h3>
+                    <p className="mt-2 text-sm text-slate-400">
+                      Deterministic scoring from trusted-source coverage and fake-news heuristics before AI reasoning.
+                    </p>
+                  </div>
+                  <div className={`text-sm font-bold uppercase tracking-widest ${getConfidenceBandTone(result.evidenceSummary.confidenceBand)}`}>
+                    {result.evidenceSummary.confidenceBand} confidence band
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
+                  {[
+                    {
+                      label: 'Credibility Score',
+                      value: `${(result.evidenceSummary.credibilityScore * 100).toFixed(0)}%`,
+                    },
+                    {
+                      label: 'Trusted Sources',
+                      value: String(result.evidenceSummary.trustedCount),
+                    },
+                    {
+                      label: 'Coverage Score',
+                      value: `${(result.evidenceSummary.sourceCoverage * 100).toFixed(0)}%`,
+                    },
+                    {
+                      label: 'Heuristic Risk',
+                      value: `${(result.evidenceSummary.heuristicSummary.riskScore * 100).toFixed(0)}%`,
+                    },
+                    {
+                      label: 'Cross-check Matches',
+                      value: String(result.evidenceSummary.crossCheckSummary.matchedReports),
+                    },
+                  ].map((item) => (
+                    <div key={item.label} className="rounded-xl border border-white/5 bg-white/5 p-4">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">{item.label}</p>
+                      <p className="mt-2 text-2xl font-black text-white">{item.value}</p>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-2">
+                  <div className="rounded-2xl border border-white/5 bg-slate-900/40 p-5 lg:col-span-2">
+                    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                      <div>
+                        <p className="text-[11px] font-bold uppercase tracking-widest text-slate-400">
+                          Trusted Cross-check
+                        </p>
+                        <p className="mt-2 text-sm text-slate-500">
+                          Matching coverage pulled from trusted reporting sources before the AI verdict.
+                        </p>
+                      </div>
+                      <div className={`text-sm font-bold uppercase tracking-widest ${getCrossCheckTone(result.evidenceSummary.crossCheckSummary.status)}`}>
+                        {result.evidenceSummary.crossCheckSummary.status} coverage
+                      </div>
+                    </div>
+
+                    <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
+                      <div className="rounded-xl border border-white/5 bg-white/5 p-4">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Agreement Score</p>
+                        <p className="mt-2 text-2xl font-black text-white">
+                          {(result.evidenceSummary.crossCheckSummary.agreementScore * 100).toFixed(0)}%
+                        </p>
+                      </div>
+                      <div className="rounded-xl border border-white/5 bg-white/5 p-4">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Trusted Domains</p>
+                        <p className="mt-2 text-2xl font-black text-white">
+                          {result.evidenceSummary.crossCheckSummary.trustedDomains}
+                        </p>
+                      </div>
+                      <div className="rounded-xl border border-white/5 bg-white/5 p-4">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Search Query</p>
+                        <p className="mt-2 line-clamp-2 text-sm font-semibold text-slate-200">
+                          {result.evidenceSummary.crossCheckSummary.query || 'No trusted cross-check query was generated.'}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      {result.evidenceSummary.crossCheckSummary.results.length > 0 ? (
+                        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                          {result.evidenceSummary.crossCheckSummary.results.slice(0, 3).map((item, index) => (
+                            <a
+                              key={`${item.hostname}-${index}`}
+                              href={item.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="rounded-xl border border-white/5 bg-white/5 p-4 transition hover:border-emerald-500/30 hover:bg-white/10"
+                            >
+                              <div className="flex items-center justify-between gap-3">
+                                <p className="line-clamp-2 text-sm font-bold text-slate-200">{item.title}</p>
+                                <span className="shrink-0 text-[10px] font-bold uppercase tracking-widest text-emerald-400">
+                                  Trusted
+                                </span>
+                              </div>
+                              <p className="mt-2 text-xs text-slate-400">{item.sourceName}</p>
+                              <p className="mt-1 text-xs text-slate-500">{getDisplayUrl(item.url)}</p>
+                            </a>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-slate-500">
+                          No matching trusted reports were retrieved for this check yet.
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="mt-4 rounded-xl border border-white/5 bg-white/5 p-4">
+                      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                        <div>
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">
+                            Statement Breakdown
+                          </p>
+                          <p className="mt-2 text-sm text-slate-500">
+                            Article or claim text is split into statements and checked for support or contradiction.
+                          </p>
+                        </div>
+                        <div className="text-xs font-bold uppercase tracking-widest text-slate-400">
+                          {result.evidenceSummary.statementBreakdown.items.length} statements checked
+                        </div>
+                      </div>
+
+                      <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
+                        {[
+                          {
+                            label: 'Supported',
+                            value: result.evidenceSummary.statementBreakdown.supportedShare,
+                            tone: 'text-emerald-300',
+                            bar: 'bg-emerald-400',
+                          },
+                          {
+                            label: 'Contradicted',
+                            value: result.evidenceSummary.statementBreakdown.contradictedShare,
+                            tone: 'text-rose-300',
+                            bar: 'bg-rose-400',
+                          },
+                          {
+                            label: 'Unclear',
+                            value: result.evidenceSummary.statementBreakdown.unclearShare,
+                            tone: 'text-amber-300',
+                            bar: 'bg-amber-400',
+                          },
+                        ].map((item) => (
+                          <div key={item.label} className="rounded-xl border border-white/5 bg-slate-950/40 p-4">
+                            <div className="flex items-center justify-between gap-3">
+                              <p className="text-xs font-semibold text-slate-300">{item.label}</p>
+                              <p className={`text-sm font-black ${item.tone}`}>
+                                {(item.value * 100).toFixed(0)}%
+                              </p>
+                            </div>
+                            <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-800/90">
+                              <div
+                                className={`h-full rounded-full ${item.bar}`}
+                                style={{ width: `${item.value * 100}%` }}
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="mt-4 space-y-3">
+                        {result.evidenceSummary.statementBreakdown.items.length > 0 ? (
+                          result.evidenceSummary.statementBreakdown.items.slice(0, 4).map((item, index) => (
+                            <div key={`${item.text}-${index}`} className="rounded-xl border border-white/5 bg-slate-950/40 p-4">
+                              <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+                                <p className="text-sm font-semibold leading-relaxed text-slate-200">{item.text}</p>
+                                <span
+                                  className={`shrink-0 rounded-md px-2.5 py-1 text-[10px] font-bold uppercase tracking-widest ${
+                                    item.status === 'supported'
+                                      ? 'bg-emerald-500/15 text-emerald-300'
+                                      : item.status === 'contradicted'
+                                        ? 'bg-rose-500/15 text-rose-300'
+                                        : 'bg-amber-500/15 text-amber-300'
+                                  }`}
+                                >
+                                  {item.status}
+                                </span>
+                              </div>
+                              <p className="mt-2 text-xs text-slate-500">
+                                Support {(item.supportScore * 100).toFixed(0)}% | Contradiction {(item.contradictionScore * 100).toFixed(0)}%
+                              </p>
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                {item.reasons.map((reason) => (
+                                  <span
+                                    key={`${item.text}-${reason}`}
+                                    className="rounded-lg border border-white/5 bg-white/5 px-2.5 py-1 text-[10px] font-bold text-slate-300"
+                                  >
+                                    {reason}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-sm text-slate-500">
+                            No clear article statements were long enough to break down yet.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
+                      <div className="rounded-xl border border-white/5 bg-white/5 p-4">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Entity Match Score</p>
+                        <p className="mt-2 text-2xl font-black text-white">
+                          {(result.evidenceSummary.entityConsistency.matchScore * 100).toFixed(0)}%
+                        </p>
+                      </div>
+                      <div className="rounded-xl border border-white/5 bg-white/5 p-4 md:col-span-2">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Entity Comparison</p>
+                        {result.evidenceSummary.entityConsistency.claimEntities.length > 0 ? (
+                          <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-2">
+                            <div>
+                              <p className="text-xs font-semibold text-emerald-300">Matched entities</p>
+                              {result.evidenceSummary.entityConsistency.matchedEntities.length > 0 ? (
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                  {result.evidenceSummary.entityConsistency.matchedEntities.map((entity) => (
+                                    <span
+                                      key={`match-${entity}`}
+                                      className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-[10px] font-bold text-emerald-300"
+                                    >
+                                      {entity}
+                                    </span>
+                                  ))}
+                                </div>
+                              ) : (
+                                <p className="mt-2 text-sm text-slate-500">No key entities matched trusted reports.</p>
+                              )}
+                            </div>
+
+                            <div>
+                              <p className="text-xs font-semibold text-rose-300">Unmatched entities</p>
+                              {result.evidenceSummary.entityConsistency.unmatchedEntities.length > 0 ? (
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                  {result.evidenceSummary.entityConsistency.unmatchedEntities.map((entity) => (
+                                    <span
+                                      key={`unmatch-${entity}`}
+                                      className="rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-[10px] font-bold text-rose-300"
+                                    >
+                                      {entity}
+                                    </span>
+                                  ))}
+                                </div>
+                              ) : (
+                                <p className="mt-2 text-sm text-slate-500">No important entity mismatches detected.</p>
+                              )}
+                            </div>
+                          </div>
+                        ) : (
+                          <p className="mt-2 text-sm text-slate-500">
+                            No important names, dates, or titles were extracted for comparison.
+                          </p>
+                        )}
+                        {result.evidenceSummary.entityConsistency.unmatchedEntities.length > 0 && (
+                          <p className="mt-4 rounded-xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-sm font-semibold text-rose-300">
+                            Important names or titles contradict trusted reports.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                  </div>
+
+                  <div className="rounded-2xl border border-white/5 bg-slate-900/40 p-5">
+                    <p className="mb-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">
+                      Heuristic Signals
+                    </p>
+                    {result.evidenceSummary.heuristicSummary.signals.length > 0 ? (
+                      <div className="flex flex-wrap gap-2">
+                        {result.evidenceSummary.heuristicSummary.signals.map((signal) => (
+                          <span
+                            key={signal.key}
+                            className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-[10px] font-bold text-amber-300"
+                          >
+                            {signal.label}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-sm text-slate-500">No fake-news heuristics were strongly triggered.</p>
+                    )}
+                  </div>
+
+                  <div className="rounded-2xl border border-white/5 bg-slate-900/40 p-5">
+                    <p className="mb-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">
+                      Source Evidence
+                    </p>
+                    {result.evidenceSummary.evidence.length > 0 ? (
+                      <div className="space-y-3">
+                        {result.evidenceSummary.evidence.slice(0, 4).map((item, index) => (
+                          <div key={`${item.hostname}-${index}`} className="rounded-xl border border-white/5 bg-white/5 p-3">
+                            <div className="flex items-center justify-between gap-3">
+                              <p className="truncate text-sm font-bold text-slate-200">{item.title}</p>
+                              <span className={`shrink-0 text-[10px] font-bold uppercase tracking-widest ${item.trusted ? 'text-emerald-400' : 'text-amber-400'}`}>
+                                {item.trusted ? 'Trusted' : 'Unverified'}
+                              </span>
+                            </div>
+                            <p className="mt-1 text-xs text-slate-500">
+                              {item.hostname} | {(item.score * 100).toFixed(0)}% credibility
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-sm text-slate-500">No source evidence has been collected yet.</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+
               {result.sources && result.sources.length > 0 && (
                 <div className="dashboard-card glass rounded-2xl border border-white/10 p-6 shadow-xl">
                   <h3 className="mb-4 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-slate-300">
@@ -932,9 +1496,12 @@ function App() {
                           <LinkIcon className="h-3.5 w-3.5" />
                         </div>
                         <div className="min-w-0 flex-1">
+                          <p className="mb-1 text-[9px] font-bold uppercase tracking-widest text-emerald-300/80">
+                            {getSourceTypeLabel(src.name)}
+                          </p>
                           <p className="truncate text-xs font-bold text-slate-200">{src.name}</p>
                           <p className="mt-0.5 truncate text-[10px] text-slate-500 transition-colors group-hover:text-emerald-400/70">
-                            {src.url}
+                            {getDisplayUrl(src.url)}
                           </p>
                         </div>
                       </a>
@@ -963,7 +1530,11 @@ function App() {
                           <span
                             className={`rounded px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider ${item.verdict === 'True'
                               ? 'bg-green-500/20 text-green-400'
-                              : 'bg-red-500/20 text-red-400'
+                              : item.verdict === 'False'
+                                ? 'bg-red-500/20 text-red-400'
+                                : item.verdict === 'Insufficient Data'
+                                  ? 'bg-blue-500/20 text-blue-400'
+                                  : 'bg-yellow-500/20 text-yellow-400'
                               }`}
                           >
                             {item.verdict}
@@ -1062,7 +1633,7 @@ function App() {
                     </button>
                     {feedbackStatus === 'error' && (
                       <span className="inline-flex items-center rounded-lg bg-red-500/20 px-3 py-2 text-xs font-bold text-red-200">
-                        Please fill name, email, and message.
+                        {feedbackErrorMessage}
                       </span>
                     )}
                   </div>
@@ -1151,3 +1722,4 @@ function App() {
 }
 
 export default App;
+

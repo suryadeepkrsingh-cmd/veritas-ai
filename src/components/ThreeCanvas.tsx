@@ -1,6 +1,6 @@
 import React, { useMemo, useRef } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
-import { ContactShadows, Float } from '@react-three/drei';
+import { Float } from '@react-three/drei';
 import * as THREE from 'three';
 
 type Drifter = {
@@ -93,7 +93,7 @@ const GlobeNodes = () => {
       [-23.5, -46.6], [31.2, 121.5], [43.7, -79.4], [30.0, 31.2], [6.5, 3.4], [41.0, 28.9],
       [59.3, 18.0], [39.9, 116.4], [13.7, 100.5], [50.1, 14.4], [45.4, -75.7], [24.8, 67.0],
     ];
-    const palette = ['#7dd3fc', '#38bdf8', '#f472b6', '#facc15', '#34d399'];
+    const palette = ['#22c55e', '#10b981', '#86efac', '#ef4444', '#fb7185', '#fca5a5'];
     const pos = new Float32Array(nodeCoords.length * 3);
     const size = new Float32Array(nodeCoords.length);
     const color = new Float32Array(nodeCoords.length * 3);
@@ -139,6 +139,7 @@ const GlobeNodes = () => {
         transparent
         depthWrite={false}
         blending={THREE.AdditiveBlending}
+        vertexColors
         uniforms={{ uTime: { value: 0 } }}
         vertexShader={`
           attribute float aSize;
@@ -211,12 +212,42 @@ const GlobeArcs = () => {
     color: string;
     opacity: number;
   }> = [
-      { start: [40.7, -74.0], end: [51.5, -0.1], color: '#7dd3fc', opacity: 0.65 },
-      { start: [28.6, 77.2], end: [35.6, 139.7], color: '#38bdf8', opacity: 0.62 },
-      { start: [37.7, -122.4], end: [1.3, 103.8], color: '#34d399', opacity: 0.52 },
-      { start: [48.8, 2.3], end: [25.2, 55.3], color: '#f472b6', opacity: 0.52 },
-      { start: [19.0, 72.8], end: [-33.9, 151.2], color: '#facc15', opacity: 0.48 },
-      { start: [43.7, -79.4], end: [31.2, 121.5], color: '#7dd3fc', opacity: 0.45 },
+      {
+        start: [40.7, -74.0],
+        end: [51.5, -0.1],
+        color: '#22c55e',
+        opacity: 0.65,
+      },
+      {
+        start: [28.6, 77.2],
+        end: [35.6, 139.7],
+        color: '#ef4444',
+        opacity: 0.62,
+      },
+      {
+        start: [37.7, -122.4],
+        end: [1.3, 103.8],
+        color: '#10b981',
+        opacity: 0.52,
+      },
+      {
+        start: [48.8, 2.3],
+        end: [25.2, 55.3],
+        color: '#fb7185',
+        opacity: 0.52,
+      },
+      {
+        start: [19.0, 72.8],
+        end: [-33.9, 151.2],
+        color: '#86efac',
+        opacity: 0.48,
+      },
+      {
+        start: [43.7, -79.4],
+        end: [31.2, 121.5],
+        color: '#f87171',
+        opacity: 0.45,
+      },
     ];
 
   return (
@@ -366,6 +397,7 @@ const OrbitRings = ({ palette }: { palette: ScenePalette }) => {
     </group>
   );
 };
+
 
 const generateDrifterData = (count: number) => {
   const palette = ['#7dd3fc', '#38bdf8', '#f472b6', '#facc15', '#34d399'];
@@ -518,11 +550,16 @@ const LightRibbons = ({ theme }: { theme: ThemeMode }) => {
   );
 };
 
-const GlobeScene = ({ palette, theme }: { palette: ScenePalette; theme: ThemeMode }) => (
+const GlobeScene = ({
+  palette,
+  theme,
+}: {
+  palette: ScenePalette;
+  theme: ThemeMode;
+}) => (
   <Float speed={1.2} rotationIntensity={0.12} floatIntensity={0.25}>
     <group position={[0, 0.2, 0]}>
       <GlobeShell palette={palette} />
-      <GlobeNodes />
       <GlobeArcs />
       <OrbitRings palette={palette} />
       <RotatingCore palette={palette} />
@@ -582,16 +619,6 @@ export const ThreeCanvas: React.FC<{ theme: ThemeMode }> = ({ theme }) => {
         <GlobeScene palette={palette} theme={theme} />
         <DriftingSignals count={theme === 'light' ? 90 : 70} />
         <CameraRig />
-
-        <ContactShadows
-          frames={1}
-          resolution={256}
-          position={[0, -3.8, 0]}
-          opacity={0.16}
-          scale={16}
-          blur={1.6}
-          far={4.2}
-        />
       </Canvas>
     </div>
   );
