@@ -324,18 +324,16 @@ function App() {
     recognition.lang = 'en-IN';
 
     recognition.onresult = (event) => {
-      let transcript = '';
       let finalTranscript = '';
 
       for (let index = event.resultIndex; index < event.results.length; index += 1) {
-        transcript += event.results[index][0].transcript;
         if (event.results[index].isFinal) {
           finalTranscript += event.results[index][0].transcript;
         }
       }
 
-      setInput(transcript.trimStart());
       if (finalTranscript.trim()) {
+        setInput(prev => prev + finalTranscript);
         latestVoiceTranscriptRef.current = finalTranscript.trim();
       }
     };

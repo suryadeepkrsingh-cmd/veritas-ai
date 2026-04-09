@@ -101,7 +101,7 @@ const GlobeArc = ({
     const endVec = globePoint(end[0], end[1], 2.28);
     const mid = startVec.clone().add(endVec).multiplyScalar(0.5).normalize().multiplyScalar(3.2);
     const curve = new THREE.CatmullRomCurve3([startVec, mid, endVec]);
-    return curve.getPoints(64);
+    return curve.getPoints(48);
   }, [start, end]);
 
   const lineObject = useMemo(() => {
@@ -347,8 +347,10 @@ const DriftingSignals = ({ count = 90 }) => {
   }, [particles, colorObj]);
 
   useFrame((state) => {
-    particles.forEach((particle, index) => {
-      const time = state.clock.elapsedTime * particle.speed + particle.angle;
+    const et = state.clock.elapsedTime;
+    for (let i = 0; i < count; i++) {
+      const particle = particles[i];
+      const time = et * particle.speed + particle.angle;
       const x = Math.cos(time) * particle.radius;
       const z = Math.sin(time) * particle.radius;
       const y = particle.height + Math.sin(time * 1.8) * 0.24;
@@ -356,9 +358,8 @@ const DriftingSignals = ({ count = 90 }) => {
       dummy.position.set(x, y, z);
       dummy.scale.setScalar(particle.scale);
       dummy.updateMatrix();
-      mesh.current.setMatrixAt(index, dummy.matrix);
-    });
-
+      mesh.current.setMatrixAt(i, dummy.matrix);
+    }
     mesh.current.instanceMatrix.needsUpdate = true;
   });
 
@@ -439,6 +440,8 @@ const CrystalRibbon = ({ color, opacity }: { color: string; opacity: number }) =
     return new THREE.CatmullRomCurve3(points);
   }, []);
 
+  const geometry = useMemo(() => new THREE.TubeGeometry(curve, 48, 0.015, 8, false), [curve]);
+
   useFrame((state) => {
     if (meshRef.current) {
       meshRef.current.rotation.y = state.clock.elapsedTime * 0.2;
@@ -447,8 +450,7 @@ const CrystalRibbon = ({ color, opacity }: { color: string; opacity: number }) =
   });
 
   return (
-    <mesh ref={meshRef}>
-      <tubeGeometry args={[curve, 64, 0.015, 8, false]} />
+    <mesh ref={meshRef} geometry={geometry}>
       <meshBasicMaterial color={color} transparent opacity={opacity} />
     </mesh>
   );
@@ -483,8 +485,8 @@ const GlobeScene = ({
   </Float>
 );
 
-export const ThreeCanvas: React.FC<{ theme: ThemeMode }> = ({ theme }) => {
-  const palette: ScenePalette =
+export const ThreeCanvas: React.FC<{ theme: ThemeMode }> = React.memo(({ theme }) => {
+  const palette: ScenePalette = useMemo(() => 
     theme === 'light'
       ? {
         background: '#dbeafe',
@@ -511,7 +513,7 @@ export const ThreeCanvas: React.FC<{ theme: ThemeMode }> = ({ theme }) => {
         lightPrimary: '#60a5fa',
         lightSecondary: '#f472b6',
         lightTertiary: '#34d399',
-      };
+      }, [theme]);
 
   return (
     <div className="fixed inset-0 -z-10 h-full w-full pointer-events-none">
@@ -537,4 +539,4 @@ export const ThreeCanvas: React.FC<{ theme: ThemeMode }> = ({ theme }) => {
       </Canvas>
     </div>
   );
-};
+});
