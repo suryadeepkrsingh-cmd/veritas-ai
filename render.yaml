@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: veritas-ai-server
+    runtime: node
+    rootDir: server
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: GEMINI_MODEL
+        value: gemini-1.5-flash
+      - key: PORT
+        value: 3001
+      - key: GROQ_API_KEY
+        sync: false   # You'll enter this manually in the Render dashboard
+      - key: GEMINI_API_KEY
+        sync: false   # You'll enter this manually in the Render dashboard
