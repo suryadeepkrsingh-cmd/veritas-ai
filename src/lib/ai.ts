@@ -102,7 +102,8 @@ export interface FeedbackPayload {
 }
 
 const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL?.trim().replace(/\/$/, '') || 'http://127.0.0.1:3001';
+  import.meta.env.VITE_API_BASE_URL?.trim().replace(/\/$/, '') || 
+  (import.meta.env.PROD ? 'https://veritas-ai-server.onrender.com' : 'http://127.0.0.1:3001');
 const DEFAULT_EVIDENCE_SUMMARY: VerificationResult['evidenceSummary'] = {
   evidence: [],
   trustedCount: 0,

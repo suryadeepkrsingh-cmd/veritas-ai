@@ -18,7 +18,11 @@ dotenv.config({ path: path.join(__dirname, '.env') });
 const app = express();
 const port = process.env.PORT || 3001;
 
-app.use(cors());
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json());
 
 const feedbackStorePath = path.join(__dirname, 'feedback-store.json');
@@ -1862,6 +1866,6 @@ app.get('/', (req, res) => {
   `);
 });
 
-app.listen(port, () => {
-  console.log(`Fact Checker Backend listening at http://localhost:${port}`);
+app.listen(port, '0.0.0.0', () => {
+  console.log(`Fact Checker Backend listening on all interfaces at port ${port}`);
 });
