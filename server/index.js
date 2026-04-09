@@ -519,9 +519,11 @@ async function generateVerificationWithGemini(prompt) {
   const configuredModel = (process.env.GEMINI_MODEL || '').trim();
   const modelCandidates = [
     configuredModel,
+    'gemini-1.5-flash-8b',
     'gemini-1.5-flash',
     'gemini-1.5-flash-latest',
-    'gemini-2.0-flash',
+    'gemini-2.0-flash-exp',
+    'gemini-pro',
   ].filter(Boolean);
 
   let lastError = null;
