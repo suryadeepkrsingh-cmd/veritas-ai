@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import OpenAI from 'openai';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import fs from 'fs';
@@ -46,6 +47,15 @@ function saveFeedbackStore(store) {
 }
 
 const feedbackStore = loadFeedbackStore();
+
+const groqApiKey = (process.env.GROQ_API_KEY || '').trim();
+const groqModel = (process.env.GROQ_MODEL || 'llama-3.3-70b-versatile').trim();
+const groqClient = groqApiKey
+  ? new OpenAI({
+    apiKey: groqApiKey,
+    baseURL: 'https://api.groq.com/openai/v1',
+  })
+  : null;
 
 const rawKeys = process.env.GEMINI_API_KEY || '';
 const apiKeys = rawKeys.split(',').map((k) => k.trim()).filter(Boolean);
@@ -467,6 +477,88 @@ function isGeminiKeyError(error) {
     message.includes('quota') ||
     message.includes('unauthorized')
   );
+}
+
+function isGeminiModelError(error) {
+  const status = error?.status || error?.response?.status;
+  const message = String(error?.message || '').toLowerCase();
+
+  return (
+    status === 404 ||
+    message.includes('model') && message.includes('not found') ||
+    message.includes('not supported for generatecontent')
+  );
+}
+
+function extractJsonObject(rawText = '') {
+  if (!rawText) return '';
+  const text = String(rawText).trim();
+
+  if (text.startsWith('```')) {
+    const cleanedFence = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    if (cleanedFence.startsWith('{') && cleanedFence.endsWith('}')) {
+      return cleanedFence;
+    }
+  }
+
+  const firstBrace = text.indexOf('{');
+  const lastBrace = text.lastIndexOf('}');
+
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    return text.slice(firstBrace, lastBrace + 1);
+  }
+
+  return text;
+}
+
+async function generateVerificationWithGemini(prompt) {
+  if (apiKeys.length === 0) {
+    throw new Error('No GEMINI_API_KEY configured');
+  }
+
+  const configuredModel = (process.env.GEMINI_MODEL || '').trim();
+  const modelCandidates = [
+    configuredModel,
+    'gemini-1.5-flash',
+    'gemini-1.5-flash-latest',
+    'gemini-2.0-flash',
+  ].filter(Boolean);
+
+  let lastError = null;
+
+  for (let keyAttempt = 0; keyAttempt < apiKeys.length; keyAttempt += 1) {
+    const apiKey = getNextApiKey();
+    if (!apiKey) continue;
+
+    const genAI = new GoogleGenerativeAI(apiKey);
+
+    for (const modelName of modelCandidates) {
+      try {
+        const model = genAI.getGenerativeModel({ model: modelName });
+        const result = await model.generateContent(prompt);
+        const text = result?.response?.text?.()?.trim();
+
+        if (!text) {
+          throw new Error(`Gemini model ${modelName} returned empty response`);
+        }
+
+        const jsonText = extractJsonObject(text);
+        const parsed = JSON.parse(jsonText);
+        return parsed;
+      } catch (error) {
+        lastError = error;
+        if (isGeminiModelError(error)) {
+          continue;
+        }
+
+        if (isGeminiKeyError(error)) {
+          break;
+        }
+      }
+    }
+  }
+
+  throw lastError || new Error('Gemini verification failed');
 }
 
 const DEFAULT_METRIC_OVERLAY = {
@@ -899,17 +991,17 @@ function buildStatementBreakdown({ text = '', articleTitle = '', crossCheckSumma
       Math.min(
         1,
         entityMatch * 0.45 +
-          keywordOverlap * 0.3 +
-          (crossCheckSummary.agreementScore || 0) * 0.25,
+        keywordOverlap * 0.3 +
+        (crossCheckSummary.agreementScore || 0) * 0.25,
       ).toFixed(2),
     );
     const contradictionScore = Number(
       Math.min(
         1,
         criticalMismatch * 0.55 +
-          (topicOverlap > 0.25 ? 0.2 : 0) +
-          (entityMatch < 0.5 && entities.length ? 0.15 : 0) +
-          ((crossCheckSummary.agreementScore || 0) > 0.3 ? 0.1 : 0),
+        (topicOverlap > 0.25 ? 0.2 : 0) +
+        (entityMatch < 0.5 && entities.length ? 0.15 : 0) +
+        ((crossCheckSummary.agreementScore || 0) > 0.3 ? 0.1 : 0),
       ).toFixed(2),
     );
 
@@ -1000,7 +1092,8 @@ async function fetchTrustedCrossCheck({ claim, articleTitle = '' }) {
       if (!hostname || seenHostnames.has(hostname)) return undefined;
 
       const sourceMeta = getSourceCredibility(hostname);
-      if (!sourceMeta.trusted) return undefined;
+      // Accept trusted sources AND well-known domains (score >= 0.5) to avoid filtering all results
+      if (sourceMeta.score < 0.5) return undefined;
 
       seenHostnames.add(hostname);
       results.push({
@@ -1018,10 +1111,10 @@ async function fetchTrustedCrossCheck({ claim, articleTitle = '' }) {
 
     const trustedDomains = new Set(results.map((item) => item.hostname)).size;
     const agreementScore = Number(
-      Math.min(1, results.length / 4 * 0.7 + trustedDomains / 4 * 0.3).toFixed(2),
+      Math.min(1, results.length / 3 * 0.7 + trustedDomains / 3 * 0.3).toFixed(2),
     );
     const status =
-      results.length >= 4 ? 'strong' : results.length >= 2 ? 'moderate' : results.length >= 1 ? 'limited' : 'none';
+      results.length >= 3 ? 'strong' : results.length >= 2 ? 'moderate' : results.length >= 1 ? 'limited' : 'none';
 
     return {
       query,
@@ -1114,12 +1207,12 @@ function buildSourceEvidenceSummary({
     Math.min(
       1,
       averageCredibility * 0.3 +
-        trustSignal * 0.18 +
-        sourceCoverage * 0.15 +
-        claimSpecificity * 0.1 +
-        crossCheckAgreement * 0.17 +
-        entityMatchScore * 0.1 -
-        heuristicSummary.riskScore * 0.3,
+      trustSignal * 0.18 +
+      sourceCoverage * 0.15 +
+      claimSpecificity * 0.1 +
+      crossCheckAgreement * 0.17 +
+      entityMatchScore * 0.1 -
+      heuristicSummary.riskScore * 0.3,
     ),
   );
   const confidenceBand =
@@ -1173,19 +1266,21 @@ function calibrateVerificationResult(verification, evidenceSummary, isUrlClaim) 
     ...verification,
     redFlags: Array.isArray(verification.redFlags) ? [...verification.redFlags] : [],
   };
-  const weakCrossCheck = evidenceSummary.crossCheckSummary.matchedReports < 2;
-  const weakCredibility = evidenceSummary.credibilityScore < 0.58;
-  const highHeuristicRisk = evidenceSummary.heuristicSummary.riskScore >= 0.3;
-  const lowConfidenceBand = evidenceSummary.confidenceBand === 'Low';
-  const singleWeakSource = evidenceSummary.trustedCount <= 1 && evidenceSummary.sourceCoverage <= 0.25;
+  // Bug-fix: raise thresholds so legitimate True verdicts are NOT downgraded
+  const weakCrossCheck = evidenceSummary.crossCheckSummary.matchedReports < 1; // was < 2
+  const weakCredibility = evidenceSummary.credibilityScore < 0.35; // was < 0.58
+  const highHeuristicRisk = evidenceSummary.heuristicSummary.riskScore >= 0.55; // was >= 0.3
+  const lowConfidenceBand = evidenceSummary.confidenceBand === 'Low' && evidenceSummary.credibilityScore < 0.3; // was just === 'Low'
+  const singleWeakSource = evidenceSummary.trustedCount === 0 && evidenceSummary.sourceCoverage === 0;
   const matchedReports = evidenceSummary.crossCheckSummary.matchedReports || 0;
   const entityMatchScore = evidenceSummary.entityConsistency?.matchScore || 0;
   const entityCount = evidenceSummary.entityConsistency?.claimEntities?.length || 0;
   const matchedEntityCount = evidenceSummary.entityConsistency?.matchedEntities?.length || 0;
   const criticalMismatchCount = evidenceSummary.entityConsistency?.unmatchedCriticalEntities?.length || 0;
   const criticalMismatchScore = evidenceSummary.entityConsistency?.criticalMismatchScore || 0;
+  // Bug-fix: only flag entity mismatch when MULTIPLE critical entities are unmatched AND AI confidence is low
   const entityMismatch =
-    entityCount > 0 && (entityMatchScore < 0.65 || criticalMismatchCount > 0);
+    entityCount >= 3 && criticalMismatchCount >= 2 && (evidenceSummary.entityConsistency?.criticalMismatchScore || 0) >= 0.8;
   const strongContradiction =
     (
       (criticalMismatchCount >= 1 && matchedReports >= 1 && evidenceSummary.crossCheckSummary.agreementScore >= 0.3) ||
@@ -1209,22 +1304,27 @@ function calibrateVerificationResult(verification, evidenceSummary, isUrlClaim) 
     }
   }
 
-  if (
+  // Bug-fix: Only downgrade to Unverified when BOTH evidence is truly absent AND AI confidence
+  // is also below 0.5. Do NOT downgrade a verdict where the AI is already confident.
+  const aiIsConfident = typeof calibrated.confidence === 'number' && calibrated.confidence >= 0.5;
+  const shouldDowngrade =
     calibrated.verdict !== 'Unverified' &&
     calibrated.verdict !== 'False' &&
+    calibrated.verdict !== 'True' &&
+    !aiIsConfident &&
     (
-      (lowConfidenceBand && weakCrossCheck) ||
-      (weakCredibility && weakCrossCheck) ||
+      (lowConfidenceBand && weakCrossCheck && singleWeakSource) ||
       (isUrlClaim && highHeuristicRisk && singleWeakSource) ||
       entityMismatch
-    )
-  ) {
+    );
+
+  if (shouldDowngrade) {
     calibrated.verdict = 'Unverified';
     calibrated.confidence = Math.min(
       typeof calibrated.confidence === 'number' ? calibrated.confidence : 0.5,
       0.48,
     );
-    calibrated.explanation = `${calibrated.explanation} The available source coverage is too limited for a strong final claim, so this result has been downgraded to needs more evidence.`;
+    calibrated.explanation = `${calibrated.explanation} The available source coverage and AI confidence are both too limited for a strong final verdict.`;
 
     if (!calibrated.redFlags.includes('Evidence is too limited for a strong verdict')) {
       calibrated.redFlags.push('Evidence is too limited for a strong verdict');
@@ -1597,7 +1697,7 @@ app.post('/api/verify', async (req, res) => {
       
       ${claimContext}
       
-      If insufficient data is available for a confident verdict, use "Insufficient Data" as the verdict and suggest additional research sources or note the claim's novelty in the explanation.
+      If and ONLY if the claim is about a very obscure, private, or completely unverifiable event that has no public record whatsoever, set the verdict to "Unverified" and explain what additional research would help. For all well-known facts, historical events, public figures, or commonly reported news, make a decisive True or False verdict with high confidence. Do NOT say "Insufficient Data" for things that are common knowledge or mainstream news.
 
       JSON Structure:
       {
@@ -1623,41 +1723,25 @@ app.post('/api/verify', async (req, res) => {
       Only return valid JSON. No other text.
     `;
 
-    if (apiKeys.length === 0) {
-      return res.json(
-        buildFallbackVerification(
-          'Verification service is running, but no Gemini API key is configured on the server.',
-        ),
-      );
-    }
-
-    let lastError = null;
-
-    for (let attempt = 0; attempt < apiKeys.length; attempt += 1) {
-      const keyIndex = currentKeyIndex;
-      const activeKey = getNextApiKey();
-      if (!activeKey) {
-        break;
-      }
-
-      console.info(`[Gemini] Attempt ${attempt + 1}/${apiKeys.length} using key ${keyIndex + 1}/${apiKeys.length}`);
-
+    let groqError = null;
+    if (groqClient) {
       try {
-        const genAI = new GoogleGenerativeAI(activeKey);
-        const model = genAI.getGenerativeModel({
-          model: 'gemini-2.5-flash',
-          generationConfig: { responseMimeType: 'application/json' },
+        const completion = await groqClient.chat.completions.create({
+          model: groqModel,
+          messages: [
+            { role: 'system', content: 'You are an expert Fact-Checking AI. Return only valid JSON.' },
+            { role: 'user', content: prompt },
+          ],
+          temperature: 0.2,
+          response_format: { type: 'json_object' },
         });
 
-        const result = await model.generateContent(prompt);
-        const response = await result.response;
-        if (!response) {
-          throw new Error('Gemini returned an empty response');
+        const text = completion?.choices?.[0]?.message?.content?.trim();
+        if (!text) {
+          throw new Error('Groq returned an empty response');
         }
 
-        const text = response.text();
-        const jsonStr = text.replace(/```json/g, '').replace(/```/g, '').trim();
-        const verification = JSON.parse(jsonStr);
+        const verification = JSON.parse(text);
         const normalizedSources = buildNormalizedSources({
           sources: verification.sources || [],
           originalArticleUrl: isUrlClaim ? claim : '',
@@ -1666,12 +1750,12 @@ app.post('/api/verify', async (req, res) => {
           .map(normalizeRelatedClaimEntry)
           .filter(Boolean);
         const finalEvidenceSummary = buildSourceEvidenceSummary({
-            claim: verifiableClaim || claim,
-            articleUrl: isUrlClaim ? claim : '',
-            articleTitle: isUrlClaim ? scrapedArticle?.title || '' : '',
-            articleText: isUrlClaim ? scrapedArticle?.text || '' : claim,
-            sources: normalizedSources,
-            crossCheckSummary,
+          claim: verifiableClaim || claim,
+          articleUrl: isUrlClaim ? claim : '',
+          articleTitle: isUrlClaim ? scrapedArticle?.title || '' : '',
+          articleText: isUrlClaim ? scrapedArticle?.text || '' : claim,
+          sources: normalizedSources,
+          crossCheckSummary,
         });
         const calibratedVerification = calibrateVerificationResult(
           verification,
@@ -1687,20 +1771,58 @@ app.post('/api/verify', async (req, res) => {
           evidenceSummary: finalEvidenceSummary,
         });
       } catch (error) {
-        lastError = error;
-        console.error('Fact-check attempt failed:', error);
+        groqError = error;
+      }
 
-        if (!isGeminiKeyError(error) || attempt === apiKeys.length - 1) {
-          break;
-        }
+      // If Groq is configured, keep Groq as the primary/only provider.
+      // Gemini is used only when Groq is not configured.
+      return res.json(buildFallbackVerification(
+        `Verification service is online, but Groq request failed: ${groqError?.message || 'Unknown error'}. Check GROQ_API_KEY / GROQ_MODEL in server/.env.`,
+      ));
+    }
+
+    let geminiError = null;
+    if (apiKeys.length > 0) {
+      try {
+        const verification = await generateVerificationWithGemini(prompt);
+        const normalizedSources = buildNormalizedSources({
+          sources: verification.sources || [],
+          originalArticleUrl: isUrlClaim ? claim : '',
+        });
+        const normalizedRelatedClaims = (verification.relatedClaims || [])
+          .map(normalizeRelatedClaimEntry)
+          .filter(Boolean);
+        const finalEvidenceSummary = buildSourceEvidenceSummary({
+          claim: verifiableClaim || claim,
+          articleUrl: isUrlClaim ? claim : '',
+          articleTitle: isUrlClaim ? scrapedArticle?.title || '' : '',
+          articleText: isUrlClaim ? scrapedArticle?.text || '' : claim,
+          sources: normalizedSources,
+          crossCheckSummary,
+        });
+        const calibratedVerification = calibrateVerificationResult(
+          verification,
+          finalEvidenceSummary,
+          isUrlClaim,
+        );
+
+        return res.json({
+          ...DEFAULT_METRIC_OVERLAY,
+          ...calibratedVerification,
+          sources: normalizedSources,
+          relatedClaims: normalizedRelatedClaims,
+          evidenceSummary: finalEvidenceSummary,
+        });
+      } catch (error) {
+        geminiError = error;
       }
     }
 
-    return res.json(
-      buildFallbackVerification(
-        `Verification service is online, but the configured Gemini API key could not be used: ${lastError?.message || 'Unknown error'}. Replace the key in server/.env and try again.`,
-      ),
-    );
+    return res.json(buildFallbackVerification(
+      geminiError
+        ? `Verification service is online, but Gemini request failed: ${geminiError?.message || 'Unknown error'}. Check GEMINI_API_KEY / GEMINI_MODEL in server/.env.`
+        : 'Verification service is online, but no AI provider is configured. Add GROQ_API_KEY or GEMINI_API_KEY in server/.env.',
+    ));
   } catch (error) {
     console.error('Fact-check error:', error);
     return res.json(
