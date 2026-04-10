@@ -1,0 +1,6 @@
+server/
+browser-extension/
+README.md
+render.yaml
+.env
+.env.example
